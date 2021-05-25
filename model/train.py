@@ -36,11 +36,12 @@ trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_work
 testset = NeuralSupersamplingDataset(data_root, "dweebs", "cycles", source_resolution, target_resolution, "exr", history_length, transform_depth=lambda depth: np.clip(depth, 0, max_depth) / max_depth)
 testloader = DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-model = NeuralSupersamplingModel(upsampling_factor, history_length, source_resolution, target_resolution)
+model = NeuralSupersamplingModel(upsampling_factor, batch_size, history_length, source_resolution, target_resolution)
 model = model.to(device)
 
 structural_loss = SSIMLoss(ssim_window_size, reduction="none")
-perceptual_loss = PerceptualLoss(device)
+if perceptual_loss_weight != 0:
+    perceptual_loss = PerceptualLoss(device)
 optimizer = torch.optim.Adam(model.parameters(), weight_decay=weight_decay)
 scaler = torch.cuda.amp.GradScaler()
 
@@ -58,7 +59,8 @@ for epoch in range(n_epochs):
             with torch.cuda.amp.autocast(enabled=enable_amp):
                 source_rgb, source_depth, source_motion, target_rgb = data["source_rgb"].to(device), data["source_depth"].to(device), data["source_motion"].to(device), data["target_rgb"].to(device)
                 
-                predicted_rgb = model(source_rgb.to(device), source_depth.to(device), source_motion.to(device))
+                # TODO flip inpurt along height dimension
+                predicted_rgb = model(source_rgb.flip(-2).to(device), source_depth.flip(-2).to(device), source_motion.flip(-2).to(device)).flip(-2)
 
                 # TODO: without the NaN-masking and amp enabled, the loss becomes NaN
                 sl = structural_loss(predicted_rgb, target_rgb)
