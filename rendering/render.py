@@ -3,6 +3,8 @@ import os
 from enum import Enum, auto
 import bpy
 
+from config import source_resolution, target_resolution
+
 
 # print to stderr by default
 sys.stdout = sys.stderr
@@ -22,8 +24,8 @@ def render(output_directory_path: str, file_prefix: str):
         RenderingEngine.Cycles,
     ]:
         for render_resolution in [
-            (480, 270),
-            (1920, 1080),
+            source_resolution,
+            target_resolution,
         ]:
 
             context = bpy.context

@@ -1,92 +1,106 @@
+from argparse import ArgumentParser
 import os
-import numpy as np
-import cv2
 import torch
 from kornia.losses import SSIMLoss
-from torch.utils.data import DataLoader
+from kornia.metrics import ssim as compute_ssim
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 
-from model import NeuralSupersamplingModel
-from data import NeuralSupersamplingDataset
-from perceptual_loss import PerceptualLoss
-from utils import noop_context
+from .model import NeuralSupersamplingModel
+from .data import trainloader, valloader
+from .perceptual_loss import PerceptualLoss
 from config import (
+    learning_rate,
     history_length,
-    upsampling_factor,
-    batch_size,
     ssim_window_size,
     n_epochs,
-    log_interval,
-    save_interval,
     enable_amp,
-    enable_anomaly_detection,
     perceptual_loss_weight,
-    num_workers,
     weight_decay,
-    max_depth,
-    data_root,
-    device,
+    tensorboard_root,
     source_resolution,
     target_resolution,
 )
 
 
-trainset = NeuralSupersamplingDataset(data_root, "dweebs", "cycles", source_resolution, target_resolution, "exr", history_length, transform_depth=lambda depth: np.clip(depth, 0, max_depth) / max_depth)
-trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+class NeuralSupersampling(pl.LightningModule):
+    def __init__(self, learning_rate=learning_rate, weight_decay=weight_decay):
+        super().__init__()
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.model = NeuralSupersamplingModel(history_length, source_resolution, target_resolution)
+        self.structural_loss = SSIMLoss(ssim_window_size)
+        self.perceptual_loss_weight = perceptual_loss_weight
+        if perceptual_loss_weight != 0:
+            self.perceptual_loss_container = dict(loss=PerceptualLoss().to(self.device))
+        self.save_hyperparameters()
 
-testset = NeuralSupersamplingDataset(data_root, "dweebs", "cycles", source_resolution, target_resolution, "exr", history_length, transform_depth=lambda depth: np.clip(depth, 0, max_depth) / max_depth)
-testloader = DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    def _compute_perceptual_loss(self, pred, gt):
+        if self.perceptual_loss_weight == 0:
+            return 0
+        else:
+            if next(self.perceptual_loss_container["loss"].parameters()).device != pred.device:
+                self.perceptual_loss_container["loss"].backbone.to(pred.device)
+            return self.perceptual_loss_container["loss"](pred, gt)
 
-model = NeuralSupersamplingModel(upsampling_factor, batch_size, history_length, source_resolution, target_resolution)
-model = model.to(device)
+    def forward(self, batch):
+        return self.model(batch["source_rgb"], batch["source_depth"], batch["source_motion"])
 
-structural_loss = SSIMLoss(ssim_window_size, reduction="none")
-if perceptual_loss_weight != 0:
-    perceptual_loss = PerceptualLoss(device)
-optimizer = torch.optim.Adam(model.parameters(), weight_decay=weight_decay)
-scaler = torch.cuda.amp.GradScaler()
+    def training_step(self, batch, batch_idx):
+        pred = self.model(batch["source_rgb"], batch["source_depth"], batch["source_motion"])
+        gt = batch["target_rgb"]
+        sl = self.structural_loss(pred, gt)
+        pl = self._compute_perceptual_loss(pred, gt)
+        loss = sl + perceptual_loss_weight * pl
+        self.log("train_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        return loss
 
+    def validation_step(self, batch, batch_idx):
+        pred = self.model(batch["source_rgb"], batch["source_depth"], batch["source_motion"])
+        gt = batch["target_rgb"]
+        sl = self.structural_loss(pred, gt)
+        pl = self._compute_perceptual_loss(pred, gt)
+        loss = sl + perceptual_loss_weight * pl
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        ssim = torch.mean(compute_ssim(pred, gt, ssim_window_size))
+        self.log("val_ssim", ssim, on_epoch=True, prog_bar=True, logger=True)
 
-for epoch in range(n_epochs):
-    running_loss = 0
-    running_loss_items = 0
+    def test_step(self, batch, batch_idx):
+        pred = self.model(batch["source_rgb"], batch["source_depth"], batch["source_motion"])
+        gt = batch["target_rgb"]
+        sl = self.structural_loss(pred, gt)
+        pl = self._compute_perceptual_loss(pred, gt)
+        loss = sl + perceptual_loss_weight * pl
+        self.log("test_loss", loss)
+        ssim = torch.mean(compute_ssim(pred, gt, ssim_window_size))
+        self.log("test_ssim", ssim)
 
-    for i, data in enumerate(trainloader, 0):
-        with torch.autograd.detect_anomaly() if enable_anomaly_detection else noop_context():
-            model.train()
-            optimizer.zero_grad()
-            torch.cuda.empty_cache()
-
-            with torch.cuda.amp.autocast(enabled=enable_amp):
-                source_rgb, source_depth, source_motion, target_rgb = data["source_rgb"].to(device), data["source_depth"].to(device), data["source_motion"].to(device), data["target_rgb"].to(device)
-                
-                # TODO flip inpurt along height dimension
-                predicted_rgb = model(source_rgb.flip(-2).to(device), source_depth.flip(-2).to(device), source_motion.flip(-2).to(device)).flip(-2)
-
-                # TODO: without the NaN-masking and amp enabled, the loss becomes NaN
-                sl = structural_loss(predicted_rgb, target_rgb)
-                sl = torch.mean(sl[~sl.isnan()])
-
-                pl =  perceptual_loss(predicted_rgb, target_rgb) if perceptual_loss_weight != 0 else 0
-
-                loss = sl + perceptual_loss_weight * pl
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            cv2.imshow("Result", (predicted_rgb[0].detach().cpu().numpy().transpose(1, 2, 0)[..., ::-1] * 255).clip(0, 255).astype(np.uint8))
-            cv2.waitKey(1)
-
-            running_loss += loss.item()
-            running_loss_items += 1
-
-    if epoch % log_interval == log_interval - 1:
-        print(f"[{epoch + 1:05d}] loss: {running_loss / running_loss_items:.3f}")
-        running_loss = 0
-        running_loss_items = 0
-
-    if epoch % save_interval == save_interval - 1:
-        torch.save(model.state_dict(), os.path.join("weights", f"model_{epoch + 1:05d}.pt"))
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        return optimizer
 
 
-torch.save(model.state_dict(), os.path.join("weights", f"model_final.pt"))
-print("Finished Training")
+def main(args):
+    pl.seed_everything(42)
+    neural_supersampling = NeuralSupersampling()
+    os.makedirs(tensorboard_root, exist_ok=True)
+    logger = TensorBoardLogger(save_dir=tensorboard_root)
+    checkpoint_callback = ModelCheckpoint(dirpath=args.checkpoint_dir, every_n_epochs=1)
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        accelerator="auto",
+        max_epochs=n_epochs,
+        logger=logger,
+        precision=16 if enable_amp else 32,
+        callbacks=[checkpoint_callback],
+    )
+    trainer.fit(neural_supersampling, trainloader, valloader)
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--checkpoint_dir", type=str, default=os.getcwd(), help="where to store checkpoints")
+    parser = pl.Trainer.add_argparse_args(parser)
+    args = parser.parse_args()
+    main(args)

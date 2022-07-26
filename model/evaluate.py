@@ -1,24 +1,45 @@
+from argparse import ArgumentParser
 import os
-import cv2
 import torch
+from kornia.losses import SSIMLoss
+from kornia.metrics import ssim as compute_ssim
+import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 
+from .train import NeuralSupersampling
+from .data import testloader
 from config import (
+    learning_rate,
     history_length,
     upsampling_factor,
-    max_depth,
-    device,
-    inference_dtype,
+    ssim_window_size,
+    n_epochs,
+    enable_amp,
+    perceptual_loss_weight,
+    weight_decay,
+    tensorboard_root,
     source_resolution,
     target_resolution,
 )
 
-traced_model = torch.jit.load(os.path.join("..", "inference", "model_final_traced.pt"))
 
-source_rgb = cv2.imread(os.path.join(os.path.expanduser("~"), "Downloads", "Screenshot.png"))[..., 0:3][..., ::-1].transpose(1, 0, 2).copy()
-source_rgb = torch.from_numpy(source_rgb).to(device)
-source_depth = torch.zeros((source_resolution[1], source_resolution[0], 1), dtype=torch.float32, device=device)
-source_motion = torch.zeros((source_resolution[1], source_resolution[0], 2), dtype=torch.float32, device=device)
+def main(args):
+    pl.seed_everything(42)
+    neural_supersampling = NeuralSupersampling()
+    checkpoint_callback = ModelCheckpoint(dirpath=args.checkpoint_dir, every_n_epochs=1)
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        accelerator="auto",
+        precision=16 if enable_amp else 32,
+        callbacks=[checkpoint_callback],
+    )
+    trainer.test(neural_supersampling, testloader)
 
-predicted_rgb = traced_model(source_rgb, source_depth, source_motion)
-cv2.imshow("Result", predicted_rgb.detach().cpu().numpy().transpose(1, 0, 2)[..., ::-1])
-cv2.waitKey(0)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--checkpoint_dir", type=str, default=os.getcwd(), help="where to load checkpoints from")
+    parser = pl.Trainer.add_argparse_args(parser)
+    args = parser.parse_args()
+    main(args)

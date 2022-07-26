@@ -16,6 +16,6 @@ docker run \
     --device=/dev/dri/card0:/dev/dri/card0 \
 	-e DISPLAY=$DISPLAY \
 	-e XAUTHORITY=$XAUTH \
-    -v $PWD:/opt/neural-supersampling \
-    -w /opt/neural-supersampling \
+    -v $PWD:/content/neural-supersampling \
+    -w /content/neural-supersampling \
     "nytimes/blender:${BLENDER_VERSION}-gpu-ubuntu18.04" "$@"

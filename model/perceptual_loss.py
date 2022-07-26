@@ -3,9 +3,9 @@ import torchvision.models
 
 
 class PerceptualLoss(torch.nn.Module):
-    def __init__(self, device: torch.device):
+    def __init__(self):
         super().__init__()
-        self.backbone = torchvision.models.vgg.vgg16(pretrained=True).to(device)
+        self.backbone = torchvision.models.vgg.vgg16(pretrained=True)
         self.layer_to_name = {
             "3": "relu1_2",
             "8": "relu2_2",
@@ -13,6 +13,8 @@ class PerceptualLoss(torch.nn.Module):
             "22": "relu4_3"
         }
         self.eval()
+        for param in self.parameters():
+            param.requires_grad = False
     
     def forward(self, y, x):
         assert y.shape == x.shape

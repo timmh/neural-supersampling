@@ -2,7 +2,6 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import trtorch
 
 from model import NeuralSupersamplingModel
 from config import (
@@ -41,38 +40,18 @@ class WrappedModel(nn.Module):
         return reconstructed
 
 
-model = NeuralSupersamplingModel(upsampling_factor, batch_size, history_length, source_resolution, target_resolution)
-model.load_state_dict(torch.load(os.path.join("weights", "model_final.pt"), map_location=device))
-model = model.to(device)
-model.eval()
-wrapped_model = WrappedModel(model).to(device)
+def main():
+    model = NeuralSupersamplingModel(upsampling_factor, batch_size, history_length, source_resolution, target_resolution)
+    model.load_state_dict(torch.load(os.path.join("weights", "model_final.pt"), map_location=device))
+    model = model.to(device)
+    model.eval()
+    wrapped_model = WrappedModel(model).to(device)
 
-source = torch.zeros((source_resolution[1], source_resolution[0], 6), dtype=torch.float32, device=device)
+    source = torch.zeros((source_resolution[1], source_resolution[0], 6), dtype=torch.float32, device=device)
 
-traced_model = torch.jit.trace(wrapped_model, source)
-torch.jit.save(traced_model, os.path.join("..", "inference", "model_final_traced.pt"))
+    traced_model = torch.jit.trace(wrapped_model, source)
+    torch.jit.save(traced_model, os.path.join("..", "inference", "model_final_traced.pt"))
 
-# predicted_rgb = traced_model(source_rgb, source_depth, source_motion)
-# import cv2
-# cv2.imshow("Result", (predicted_rgb[0].detach().cpu().numpy().transpose(1, 2, 0)[..., ::-1] * 255).clip(0, 255).astype(np.uint8))
-# cv2.waitKey(0)
 
-# trtorch.logging.set_reportable_log_level(trtorch.logging.Level.Info)
-# trt_ts_module = trtorch.compile(traced_model, {
-#     "truncate_long_and_double": True,
-#     "input_shapes": [
-#         {
-#             "opt": [270, 480, 4],
-#         },
-#         {
-#             "opt": [270, 480, 1],
-#         },
-#         {
-#             "opt": [270, 480, 2],
-#         },
-#     ],
-#     "op_precision": torch.half,
-#     "debug": True,
-#     "workspace_size": 2 ** 32,
-# })
-# torch.jit.save(trt_ts_module, os.path.join("..", "inference", "model_final_traced.ts"))
+if __name__ == "__main__":
+    main()
