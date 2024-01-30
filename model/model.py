@@ -199,7 +199,7 @@ class TestModel(unittest.TestCase):
     def test_zero_upsampling(self):
 
         # initialize zero upsampling
-        zu = ZeroUpsampling(3, 2)
+        zu = ZeroUpsampling(3, (2, 2))
 
         # create some image
         x = torch.Tensor([
